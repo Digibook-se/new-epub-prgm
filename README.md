@@ -1,3 +1,3 @@
-# EPUB ceonvereter for word and pdf files
+# EPUB converter for word and pdf files
 
 This is a program developed to convert word or pdf files into a EPUB file. 
