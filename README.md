@@ -4,4 +4,4 @@ This is a program developed to convert word or pdf files into a EPUB file.
 
 ## Convertion from pdf
 
-To convert a pdf to EPUB just... 
+To convert a pdf to EPUB just... Just added some text in the q-environment. 
