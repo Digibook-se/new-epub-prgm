@@ -1,0 +1,6 @@
+PySide6
+ebooklib
+python-docx
+PyPDF2
+firebase-admin
+colorama

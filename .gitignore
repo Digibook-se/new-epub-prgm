@@ -1,0 +1,55 @@
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*.class
+
+# Virtuella miljöer
+.venv/
+env/
+venv/
+ENV/
+
+# Distributionspaket
+build/
+dist/
+*.egg-info/
+
+# Installerade beroenden via pip (om de råkat komma med)
+*.egg
+*.whl
+
+# Logg-, debug- och testfiler
+*.log
+*.tmp
+*.bak
+*.swp
+
+# OS-filer
+.DS_Store
+Thumbs.db
+
+# IDE/editor-filer
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# PyInstaller
+*.spec
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# mypy
+.mypy_cache/
+
+# pycache & coverage
+.cache/
+coverage.*
+htmlcov/
+
+# pytest
+.pytest_cache/
+
+# dotenv
+.env
