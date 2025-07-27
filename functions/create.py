@@ -1,10 +1,12 @@
-# from xml.dom import minidom
+# create.py
 import os
-import base64
 import re
+import base64
+
 from ebooklib import epub
 from ebooklib.epub import EpubHtml, EpubNav, EpubNcx, Link
 from ebooklib.utils import create_pagebreak
+
 from functions.createHelpers import (
     getCoverImg,
     getOpeningElementTag,
@@ -16,54 +18,60 @@ from functions.opfAndTocModifyer import setCorrectMetatags, modifyOpf, modifyToc
 from structuralComponents.structure import getCoverPageXml
 from miniComponents.copyright import getCopyrightPage
 from classes.BookToBuild import BookToBuild
-from Styles import base
+
 from colorama import Fore  # type: ignore
 
-def createEbook(newBook):
-    # --- 0) Se till att Books-mappen finns ---
-    os.makedirs('./Books', exist_ok=True)
 
-    # --- 1) Initiera bok och hjälpar-objekt ---
+def createEbook(newBook: dict):
+    """
+    Build and write an EPUB3 file from newBook metadata and content.
+    newBook must contain: title, author, ISBN, categories (list of dicts with 'value'), description,
+    content (list of sections with 'Paragraph'), optional css (bytes), photographer.
+    """
+    # Ensure output directory
+    os.makedirs('Books', exist_ok=True)
+
+    # Initialize book and helper
     book = epub.EpubBook()
-    bookToBuild = BookToBuild()
+    builder = BookToBuild()
+    builder.Content = newBook.get('content', [])
 
-    # --- 2) Metadata ---
+    # Metadata
     book.set_identifier(newBook['title'])
     book.set_title(newBook['title'])
     book.set_language('se')
     book.add_author(newBook['author'])
 
-    # --- 3) Lägg in användarens innehåll på rätt ställe! ---
-    bookToBuild.Content = newBook['content']
+    # Cover image
+    cover_path = getCoverImg(newBook)
+    with open(cover_path, 'rb') as f:
+        cover_data = f.read()
+    book.set_cover(os.path.basename(cover_path), cover_data, create_page=False)
 
-    # --- 4) Omslagsbild utan default cover.xhtml ---
-    coverImgPath = getCoverImg(newBook)
-    data = open(f'./{coverImgPath}', 'rb').read()
-    book.set_cover(coverImgPath, data, create_page=False)
-
-    # --- 5) Skapa egen omslagssida ---
-    coverPage = EpubHtml(title='Omslag', file_name='coverImg.xhtml', lang='en')
-    coverPage.content = getCoverPageXml(coverImgPath)
+    # Custom cover page
+    coverPage = EpubHtml(title='Omslag', file_name='cover.xhtml', lang='se')
+    coverPage.content = getCoverPageXml(cover_path)
     book.add_item(coverPage)
 
-    # --- 6) CSS ---
+    # CSS
+    css_bytes = newBook.get('css', b'')
     css = epub.EpubItem(
-        uid="style_nav",
-        file_name="style/styles.css",
-        media_type="text/css",
-        content=base.base
+        uid='style_nav',
+        file_name='styles.css',
+        media_type='text/css',
+        content=css_bytes
     )
     book.add_item(css)
     coverPage.add_item(css)
 
-    # --- 7) Copyright ---
+    # Copyright page
     copyrightPage = EpubHtml(
         title='Copyright',
         file_name='copyright.xhtml',
-        lang='en'
+        lang='se'
     )
     copyrightPage.content = getCopyrightPage(
-        book.title,
+        newBook['title'],
         newBook['author'],
         newBook.get('photographer', ''),
         newBook['ISBN']
@@ -71,221 +79,142 @@ def createEbook(newBook):
     copyrightPage.add_item(css)
     book.add_item(copyrightPage)
 
-    # --- Steg 1: Läs in alla “raw” html-paragrafer, listor, bilder ---
+    # Collect raw HTML fragments
     htmlParagraphs = []
-    headingElementsForToc = []
-    contentImages = []
-    imgIterator = 1
+    headings = []
 
-    for section in bookToBuild.Content:
+    for section in builder.Content:
         runs = section.get('Paragraph', [])
-
-        # Bild i texten?
-        if section.get('Id', '').endswith('IMG') and runs:
-            img_data = runs[0].get('base64DataUrl', '').split(',')[-1]
-            binary = base64.b64decode(img_data)
-            img_id = section['Id'].replace('-', '')[:-3]
-            img_path = f'img/{img_id}.jpg'
-            os.makedirs(os.path.dirname(img_path), exist_ok=True)
-            with open(img_path, 'wb') as f:
-                f.write(binary)
-            img_item = epub.EpubItem(
-                uid=f"img_{imgIterator}",
-                file_name=img_path,
-                media_type='image/jpeg',
-                content=binary
-            )
-            book.add_item(img_item)
-            htmlParagraphs.append(f"<img src='{img_path}' alt=''/>")
-            contentImages.append(img_id)
-            imgIterator += 1
-            continue
-
-        # Tom rad → <br/>
+        # Empty -> line break
         if not runs:
             htmlParagraphs.append('<br/>')
             continue
-
-        # Sida‐break
+        # Page-break marker
         if any(r.get('Type') == 'pagebreak' for r in runs):
             htmlParagraphs.append('¤PAGEBREAK¤')
             continue
-
-        # Listor?
-        firstType = runs[0].get('Type')
-        if firstType == 'bulletListParagraph':
-            htmlParagraphs.append('<ul>')
-            for run in runs:
-                text = run.get('Text', '')
-                htmlParagraphs.append(f"<li>{text}</li>")
-            htmlParagraphs.append('</ul>')
-            continue
-        if firstType == 'numberedListParagraph':
-            htmlParagraphs.append('<ol>')
-            for run in runs:
-                text = run.get('Text', '')
-                htmlParagraphs.append(f"<li>{text}</li>")
-            htmlParagraphs.append('</ol>')
-            continue
-
-        # Heading eller vanlig paragraf
+        # Determine tag
         first = runs[0]
-        isHeading = first.get('Type') in ('Heading1', 'Rubrik1')
-        if isHeading:
-            full_heading = ''.join(r.get('Text', '') for r in runs).strip()
-            headingElementsForToc.append(full_heading)
+        if first.get('Type') in ('Heading1', 'Rubrik1'):
+            full_text = ''.join(r.get('Text', '') for r in runs).strip()
+            headings.append(full_text)
+            tag_open, tag_close = '<h1>', '</h1>'
+        else:
+            tag_open, tag_close = '<p>', '</p>'
 
-        html = getOpeningElementTag(first.get('Type'))
-        # Gruppera runs med identiska attribut
+        html = tag_open
         i = 0
         while i < len(runs):
             attrs = runs[i].get('Attributes', [])
-            text_grp = runs[i].get('Text', '')
+            text = runs[i].get('Text', '')
             j = i + 1
             while j < len(runs) and runs[j].get('Attributes', []) == attrs:
-                text_grp += runs[j].get('Text', '')
+                text += runs[j].get('Text', '')
                 j += 1
             if attrs:
-                span_style = ''.join(getStyle(a) for a in attrs)
-                html += f"<span style='{span_style}'>{text_grp}</span>"
+                style = ''.join(getStyle(a) for a in attrs)
+                html += f"<span style='{style}'>{text}</span>"
             else:
-                html += text_grp
+                html += text
             i = j
-
-        html += getClosingElementTag(first.get('Type'))
+        html += tag_close
         htmlParagraphs.append(html)
 
-    # --- Steg 2: Montera kapitel med indent‐logik ---
-    chaptersToAdd = []
+    # Assemble chapters with indent logic
+    chapters = []
     chapter = None
-    chapCount = 0
-    pbIterator = 1
-    firstPara = True
+    chap_idx = 0
+    pb_count = 1
+    first_para = True
 
-    for p in htmlParagraphs:
-        # Radbrytning → ingen indentning på nästa
-        if p == '<br/>':
-            if chapter:
-                chapter.content += p
-            firstPara = True
+    for frag in htmlParagraphs:
+        if frag == '<br/>' and chapter:
+            chapter.content += frag
+            first_para = True
+            continue
+        if frag == '¤PAGEBREAK¤' and chapter:
+            chapter.content += create_pagebreak(pb_count)
+            pb_count += 1
             continue
 
-        # Sida‐break
-        if p == '¤PAGEBREAK¤':
+        # Start new chapter
+        if frag.startswith('<h1') or chapter is None:
             if chapter:
-                chapter.content += create_pagebreak(pbIterator)
-                pbIterator += 1
-            continue
+                chapter.add_item(css)
+                book.add_item(chapter)
+                chapters.append(chapter)
+            chap_idx += 1
+            chapter = EpubHtml(
+                title=f'chapter{chap_idx}',
+                file_name=f'chapter{chap_idx}.xhtml',
+                lang='se'
+            )
+            chapter.structure = []
+            if chap_idx <= len(headings):
+                chapter.structure.append(
+                    Link(chapter.file_name, headings[chap_idx-1], f'navPoint-h1-{chap_idx}')
+                )
+            chapter.content = ''
+            first_para = True
 
-        # Nytt kapitel
-        if p.startswith('<h1') or chapter is None:
-            # Spara föregående kapitel om det inte är tomt
-            if chapter:
-                if chapter.content.strip():
-                    chapter.add_item(css)
-                    book.add_item(chapter)
-                    chaptersToAdd.append(chapter)
-                else:
-                    print("DEBUG: Skippade tomt kapitel")
+        # Indent first paragraph unless centered
+        if frag.startswith('<p') and first_para and 'text-align:center' not in frag:
+            frag = frag.replace('<p', '<p style="text-indent:0;"', 1)
+        # Collapse single centered span
+        m = re.match(r"<p[^>]*>\s*<span style=['\"]text-align:center;?['\"]>(.*?)</span>\s*</p>", frag, re.DOTALL)
+        if m:
+            inner = m.group(1)
+            frag = f'<p style="text-align:center;">{inner}</p>'
 
-            chapCount += 1
-            title = f'chapter{chapCount}'
-            chapter = EpubHtml(title=title, file_name=f'{title}.xhtml')
+        chapter.content += frag
+        first_para = False
 
-            # Lägg in i TOC
-            if chapCount - 1 < len(headingElementsForToc):
-                nav_id = f'navPoint-h1-{chapCount}'
-                chapter.structure = [
-                    Link(f'{title}.xhtml',
-                         headingElementsForToc[chapCount - 1],
-                         nav_id)
-                ]
+    # Finalize last chapter
+    if chapter and getattr(chapter, 'content', '').strip():
+        chapter.add_item(css)
+        book.add_item(chapter)
+        chapters.append(chapter)
 
-            # Första paragrafen i kapitlet: undertryck indent om inte centrerad
-            if p.startswith('<p'):
-                if firstPara and 'text-align:center' not in p:
-                    p = p.replace('<p', '<p style="text-indent:0;"', 1)
-
-                # Slå ihop om enbart centrerad span
-                m = re.match(
-                    r"<p[^>]*>\s*<span style=['\"]text-align:center;?['\"]>(.*?)</span>\s*</p>",
-                    p, flags=re.DOTALL)
-                if m:
-                    inner = m.group(1)
-                    p = f"<p style=\"text-align:center;\">{inner}</p>"
-
-            firstPara = False
-            chapter.content = p
-
-        else:
-            # Fortsätt på samma kapitel
-            if p.startswith('<p'):
-                if firstPara and 'text-align:center' not in p:
-                    p = p.replace('<p', '<p style="text-indent:0;"', 1)
-                m = re.match(
-                    r"<p[^>]*>\s*<span style=['\"]text-align:center;?['\"]>(.*?)</span>\s*</p>",
-                    p, flags=re.DOTALL)
-                if m:
-                    inner = m.group(1)
-                    p = f"<p style=\"text-align:center;\">{inner}</p>"
-                firstPara = False
-            chapter.content += p
-
-    # Lägg till sista kapitlet
-    if chapter:
-        if chapter.content.strip():
-            chapter.add_item(css)
-            book.add_item(chapter)
-            chaptersToAdd.append(chapter)
-        else:
-            print("DEBUG: Skippade tomt kapitel (sista)")
-
-    # --- Steg 3: TOC, spine, NCX, skriv ut EPUB ---
-    sections = []
-    for chap in chaptersToAdd:
-        sections.extend(getattr(chap, 'structure', []))
-
-    book.toc = (
-        epub.Link('copyright.xhtml', 'Copyright', 'copyright'),
-        *sections
-    )
+    # Table of Contents & Navigation
+    toc_items = [Link('copyright.xhtml', 'Copyright', 'copyright')]
+    for ch in chapters:
+        toc_items.extend(ch.structure)
+    book.toc = tuple(toc_items)
     book.add_item(epub.EpubNcx())
-    nav = book.add_item(epub.EpubNav())
-    nav.add_item(css)
+    nav = book.add_item(epub.EpubNav()); nav.add_item(css)
 
+    # Spine
     spine = [coverPage, copyrightPage]
-    if newBook.get('toc'):
-        spine.append('nav')
-    spine.extend(chaptersToAdd)
+    spine.extend(chapters)
     book.spine = spine
 
-    # WCAG-metadata
-    cats = [c['value'] for c in newBook['categories']]
+    # WCAG metadata
     setCorrectMetatags(
         book,
         newBook['ISBN'],
         newBook['author'],
-        cats,
-        newBook['description']
+        [c['value'] for c in newBook.get('categories', [])],
+        newBook.get('description', '')
     )
 
-    # Skriv ut
-    out = f'./Books/first_{book.title}.epub'
+    # Write EPUB to file
+    out = os.path.join('Books', f"{book.title}.epub")
     try:
         epub.write_epub(
-            out, book,
+            out,
+            book,
             {"play_order": {"enabled": True, "start_from": 1}}
         )
     except Exception as e:
         raise RuntimeError(f"Misslyckades skriva EPUB (troligen tomt dokument): {e}")
 
-    # Modifiera OPF & TOC
+    # Post-process OPF & TOC
     saved = epub.read_epub(out)
     modifyOpf(saved)
     modifyToc(saved, newBook['ISBN'])
 
-    print(Fore.GREEN + "Opf + toc korrigeringar klara." + Fore.RESET)
+    print(Fore.GREEN + f'Wrote EPUB: {out}' + Fore.RESET)
 
-    # Rensa bilder
-    for img in contentImages:
+    # Cleanup images
+    for img in getattr(builder, 'images', []):
         removeFile(f'img/{img}.jpg')
